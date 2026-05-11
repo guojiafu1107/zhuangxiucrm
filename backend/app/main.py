@@ -10,6 +10,12 @@ from app.api import auth, customers, projects, contracts, finance, materials, re
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Validate production config
+    if not settings.jwt_secret_key:
+        raise RuntimeError(
+            "JWT_SECRET_KEY is not set! "
+            "Please set it in .env or environment variables for production."
+        )
     # Startup: create tables
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

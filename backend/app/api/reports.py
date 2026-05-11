@@ -53,7 +53,10 @@ async def overview(
         funnel_data.append({"stage": stage, "count": count or 0})
 
     # Customers with stage >= "签合同" = converted
-    converted = sum(item["count"] for item in funnel_data if funnel_data.index(item) >= CUSTOMER_STAGES.index("签合同"))
+    converted = 0
+    for idx, item in enumerate(funnel_data):
+        if idx >= CUSTOMER_STAGES.index("签合同"):
+            converted += item["count"]
     lead_count = funnel_data[0]["count"]  # 线索
     conversion_rate = round(converted / lead_count * 100, 1) if lead_count > 0 else 0
 
