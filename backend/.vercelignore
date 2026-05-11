@@ -1,0 +1,11 @@
+# Vercel 部署忽略文件
+Dockerfile
+fly.toml
+.git
+__pycache__
+*.pyc
+.venv
+venv
+env
+.env
+.gitignore
