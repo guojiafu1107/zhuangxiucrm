@@ -1,0 +1,676 @@
+# 装修 CRM 系统（SaaS）开发文档
+
+> 版本：v1.0  
+> 更新日期：2026-05-09  
+> 适用范围：中小装修企业 CRM SaaS 平台  
+> 技术栈：PostgreSQL + Python/FastAPI + React/Next.js + shadcn/ui
+
+---
+
+## 目录
+
+1. [项目概述](#1-项目概述)
+2. [技术架构](#2-技术架构)
+3. [多租户与安全设计](#3-多租户与安全设计)
+4. [功能模块设计](#4-功能模块设计)
+5. [数据库设计](#5-数据库设计)
+6. [后端 API 设计](#6-后端-api-设计)
+7. [前端架构与界面规范](#7-前端架构与界面规范)
+8. [部署与运维](#8-部署与运维)
+9. [开发规范与流程](#9-开发规范与流程)
+
+---
+
+## 1. 项目概述
+
+### 1.1 项目背景
+中小装修公司普遍面临客户跟进周期长、项目阶段协同难、报价变更多、施工进度不透明等问题，市面通用 CRM 难以匹配装修业务流程。本项目旨在打造一款垂直领域的 SaaS CRM 系统，帮助装修企业标准化管理从线索到竣工的全链路业务。
+
+### 1.2 目标用户
+- 装修公司老板/店长：全局看经营数据、转化漏斗、产值利润
+- 设计师：量房记录、报价单制作、客户沟通
+- 项目经理/工长：施工排期、日志填报、验收管理
+- 财务：合同收款、付款计划、成本核算
+- 市场人员：录入线索、跟进客户、转派
+
+### 1.3 核心价值
+- **行业贴合**：内置水电、泥木、油漆等标准施工阶段模板
+- **移动优先**：工长手机端即开即用，拍照上传工地日志
+- **流程闭环**：线索→量房→报价→合同→施工→验收→售后
+- **数据决策**：多维度分析漏斗、工期、利润
+- **SaaS 弹性**：按需开通，云上免维护
+
+---
+
+## 2. 技术架构
+
+### 2.1 技术选型
+
+| 层次 | 技术 | 说明 |
+|------|------|------|
+| 前端 | React 18 + Next.js 14 + TypeScript | SSR/SSG 混合渲染，良好 SEO 与首屏性能 |
+| UI 框架 | Tailwind CSS + shadcn/ui + lucide-react | 原子化样式库，高度可定制，视觉现代 |
+| 状态管理 | TanStack Query (服务端) + Zustand (客户端) | 请求缓存、全局 UI 状态 |
+| 表单 | React Hook Form + Zod | 高性能表单与严谨校验 |
+| 后端 | Python 3.11+ / FastAPI | 异步高性能，自动生成 OpenAPI 文档 |
+| ORM | SQLAlchemy 2.0 async + asyncpg | 异步数据库操作，迁移用 Alembic |
+| 数据库 | PostgreSQL 15+ | 多租户 RLS、JSONB、全文检索、物化视图 |
+| 缓存/队列 | Redis + Celery | 会话缓存、统计缓存、异步任务（通知、报表） |
+| 文件存储 | MinIO / AWS S3 兼容存储 | 设计图、合同、施工照片 |
+| 认证 | JWT (OAuth2) + httpOnly cookies | 双 token 刷新机制 |
+| 部署 | Docker Compose / Kubernetes | 容器化编排，易于扩展 |
+| 监控 | Prometheus + Grafana + Sentry | 性能监控、错误追踪 |
+
+### 2.2 架构图
+
+```
+[CDN] 前端静态资源
+   │
+[负载均衡/Ingress]
+   │
+[API 网关 (Kong/Traefik/Nginx)]
+   │
+[FastAPI 服务集群 (Docker)]
+   ├─ 业务逻辑层
+   ├─ 数据库交互（asyncpg pool）
+   │
+   ├── PostgreSQL (主从)
+   ├── Redis (缓存/队列)
+   ├── Celery Workers (异步任务)
+   └── S3 对象存储
+        │
+[Prometheus + Grafana 监控]
+[Sentry 错误收集]
+```
+
+**多租户数据隔离**：共享数据库 + PostgreSQL Row-Level Security（RLS），所有业务表均含 `tenant_id`，策略强制隔离。
+
+---
+
+## 3. 多租户与安全设计
+
+### 3.1 租户标识与注入
+- 用户登录后 JWT payload 包含 `tenant_id`（UUID）
+- 所有 API 请求经过认证中间件，提取 tenant_id，存入请求上下文
+- 数据库连接时执行 `SET app.tenant_id = '<tenant_id>'`，RLS 策略依赖该会话变量
+
+### 3.2 Row-Level Security 示例
+```sql
+-- 开启 RLS
+ALTER TABLE crm_customers ENABLE ROW LEVEL SECURITY;
+
+-- 默认拒绝（可选）
+CREATE POLICY deny_all ON crm_customers FOR ALL USING (false);
+
+-- 租户隔离策略
+CREATE POLICY tenant_isolation ON crm_customers
+    FOR ALL
+    USING (tenant_id = current_setting('app.tenant_id')::UUID)
+    WITH CHECK (tenant_id = current_setting('app.tenant_id')::UUID);
+```
+
+### 3.3 安全措施
+- **传输安全**：全站 HTTPS，HSTS 头部
+- **身份认证**：Access Token 15min 过期，Refresh Token 7天，存储于 httpOnly secure cookie
+- **权限控制**：RBAC 角色（owner, designer, pm, foreman, finance, marketing），颗粒度到 API 路径和按钮
+- **输入校验**：Pydantic 严格类型校验，SQL 参数化查询
+- **文件上传**：校验 MIME、限制 20MB、病毒扫描（可选）
+- **审计日志**：关键操作（删除、权限变更）写入 audit_log
+- **数据备份**：pg_dump 每日自动备份，异地存储
+
+---
+
+## 4. 功能模块设计
+
+### 4.1 客户管理
+**功能要点**：
+- **线索导入**：手动录入、Excel 导入、API 对接（官网表单）
+- **线索池**：未分配线索全员可见，可抢单或自动分配
+- **客户画像**：姓名、电话、户型、面积、风格、预算、来源渠道
+- **跟进记录**：时间线展示，支持电话/微信/量房/报价等类型，下次跟进提醒
+- **客户阶段**：线索→已联系→量房→报预算→签合同→在建→完工
+- **转派与协作**：将客户转给设计师或项目经理，通知实时推送
+
+### 4.2 项目管理
+**功能要点**：
+- **立项**：签约后一键创建项目，继承客户、报价信息
+- **团队指派**：设计师、项目经理、工长、监理，支持多成员
+- **施工阶段模板**：系统预置拆除→水电→泥木→油漆→安装→保洁，允许租户自定义
+- **阶段计划**：每阶段计划起止时间，实际时间，状态（未开始/进行中/已完成/延期）
+- **施工日志**：工长每日填写，文字+图片（最多9张），自动带出阶段信息
+- **巡检/验收**：关键节点拍照、备注，逐阶段强制确认
+- **项目看板**：列表/卡片视图，进度条，延期标红，拖拽调整阶段状态
+
+### 4.3 报价与合同
+**功能要点**：
+- **空间报价**：按客厅、主卧、厨卫等空间分类，每空间可添加多施工项
+- **材料引用**：从材料库拖拽选择，自动带入默认单价，可修改
+- **总额计算**：自动汇总，支持优惠/税金调整
+- **报价模板**：保存常用报价方案为模板，新建时快速加载
+- **合同生成**：基于富文本模板动态填入客户、项目、报价明细，生成 PDF
+- **合同签批**：集成电子签章 API（如法大大），线上完成签订
+- **变更单**：增项/减项记录，保留历史版本，需客户确认
+- **收款计划**：合同签署时建立分阶段收款比例（签约30%、水电30%、完工40%）
+
+### 4.4 施工进度
+**功能要点**：
+- **进度视图**：项目列表，基于阶段计划自动计算完工百分比
+- **任务分配**：每阶段可创建子任务，指派到人，截止时间
+- **催办提醒**：阶段或任务超期未更新，系统自动通知项目经理（站内+企业微信/钉钉）
+- **客户看板**：生成只读分享链接，客户无需登录即可查看最新工地进展（照片、日志）
+
+### 4.5 成本与财务
+**功能要点**：
+- **材料成本**：项目实际用料数量、单价与预算对比
+- **人工成本**：按阶段/工种记录人工支出
+- **其他费用**：管理费、运输费等
+- **应付管理**：记录供应商款项、付款计划
+- **应收管理**：关联收款计划，标记已收/未收，逾期提醒
+- **利润统计**：实时毛利计算，项目结束出具决算报表
+
+### 4.6 数据看板与分析
+**功能要点**：
+- **销售漏斗**：各阶段客户数量及转化率，对比周期
+- **业绩排行**：设计师签约金额 Top N
+- **产值报表**：按时间汇总合同额、回款额
+- **施工效率**：平均工期、各阶段平均耗时、超期项目数
+- **客户来源分析**：渠道 ROI 统计
+
+### 4.7 系统管理
+**功能要点**：
+- **租户配置**：公司名称、LOGO、施工阶段自定义、合同编号规则
+- **成员管理**：邀请、禁用、角色分配
+- **角色权限**：预设角色可修改，支持自定义角色
+- **操作日志**：记录增删改关键数据，可追溯
+- **计费与账单**：SaaS 订阅管理（按用户数/功能包），对接支付
+
+---
+
+## 5. 数据库设计
+
+### 5.1 通用约定
+- 所有业务表包含 `tenant_id UUID NOT NULL` 作为租户标识
+- 主键统一使用 UUID v4，避免自增 ID 暴露数据规模
+- 时间字段：`created_at`, `updated_at` 自动维护（触发器或 ORM 层）
+- 软删除字段：`deleted_at`，查询默认过滤
+
+### 5.2 核心表结构
+
+#### 5.2.1 用户与租户
+```sql
+CREATE TABLE tenants (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(200) NOT NULL,
+    domain VARCHAR(100) UNIQUE,
+    logo_url TEXT,
+    settings JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    name VARCHAR(100) NOT NULL,
+    email VARCHAR(200) NOT NULL,
+    phone VARCHAR(20),
+    hashed_password VARCHAR(200) NOT NULL,
+    role VARCHAR(20) NOT NULL CHECK (role IN ('owner','designer','pm','foreman','finance','marketing')),
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    UNIQUE(tenant_id, email)
+);
+```
+
+#### 5.2.2 客户域
+```sql
+CREATE TABLE crm_customers (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    name VARCHAR(100) NOT NULL,
+    phone VARCHAR(20),
+    source VARCHAR(20) CHECK (source IN ('官网','电话','转介绍','广告','其他')),
+    stage VARCHAR(20) DEFAULT '线索' CHECK (stage IN ('线索','已联系','量房','报预算','签合同','在建','完工')),
+    house_address TEXT,
+    area DECIMAL(8,2),
+    house_type VARCHAR(20),
+    style_preference VARCHAR(50),
+    budget_min INT,
+    budget_max INT,
+    assigned_to UUID REFERENCES users(id),
+    remark TEXT,
+    created_by UUID REFERENCES users(id),
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    deleted_at TIMESTAMPTZ
+);
+
+CREATE TABLE crm_follow_ups (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    customer_id UUID NOT NULL REFERENCES crm_customers(id) ON DELETE CASCADE,
+    type VARCHAR(20) NOT NULL CHECK (type IN ('电话','微信','量房','报价','其他')),
+    content TEXT,
+    next_plan TEXT,
+    next_time TIMESTAMPTZ,
+    created_by UUID REFERENCES users(id),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+```
+
+#### 5.2.3 项目域
+```sql
+CREATE TABLE pm_projects (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    customer_id UUID NOT NULL REFERENCES crm_customers(id),
+    name VARCHAR(200) NOT NULL,
+    address TEXT,
+    start_date DATE,
+    expected_end_date DATE,
+    actual_end_date DATE,
+    status VARCHAR(20) DEFAULT '待开工' CHECK (status IN ('待开工','施工中','待验收','完工','停工')),
+    progress_percent DECIMAL(5,2) DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT now(),
+    deleted_at TIMESTAMPTZ
+);
+
+CREATE TABLE pm_project_members (
+    project_id UUID NOT NULL REFERENCES pm_projects(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    role VARCHAR(20) NOT NULL CHECK (role IN ('设计师','项目经理','工长','监理','其他')),
+    PRIMARY KEY (project_id, user_id)
+);
+
+CREATE TABLE pm_stages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES pm_projects(id) ON DELETE CASCADE,
+    name VARCHAR(50) NOT NULL,
+    order_no SMALLINT NOT NULL,
+    planned_start DATE,
+    planned_end DATE,
+    actual_start DATE,
+    actual_end DATE,
+    status VARCHAR(20) DEFAULT '未开始' CHECK (status IN ('未开始','进行中','已完成','已验收','延期')),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE pm_construction_logs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    stage_id UUID NOT NULL REFERENCES pm_stages(id),
+    content TEXT NOT NULL,
+    images TEXT[] DEFAULT '{}',  -- 存储文件 key 数组
+    created_by UUID REFERENCES users(id),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+```
+
+#### 5.2.4 报价与合同域
+```sql
+CREATE TABLE contract_quotations (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    customer_id UUID REFERENCES crm_customers(id),
+    project_id UUID REFERENCES pm_projects(id),
+    total_amount DECIMAL(12,2) NOT NULL,
+    discount DECIMAL(12,2) DEFAULT 0,
+    status VARCHAR(20) DEFAULT '草稿' CHECK (status IN ('草稿','已发送','已确认','已签约','作废')),
+    created_by UUID REFERENCES users(id),
+    created_at TIMESTAMPTZ DEFAULT now(),
+    updated_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE contract_quotation_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    quotation_id UUID NOT NULL REFERENCES contract_quotations(id) ON DELETE CASCADE,
+    space VARCHAR(50) NOT NULL,
+    category VARCHAR(50) NOT NULL,
+    item_name VARCHAR(200) NOT NULL,
+    unit VARCHAR(20) NOT NULL,
+    quantity DECIMAL(10,2) NOT NULL,
+    unit_price DECIMAL(10,2) NOT NULL,
+    amount DECIMAL(12,2) GENERATED ALWAYS AS (quantity * unit_price) STORED
+);
+
+CREATE TABLE contract_contracts (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    quotation_id UUID REFERENCES contract_quotations(id),
+    project_id UUID REFERENCES pm_projects(id),
+    contract_no VARCHAR(50) NOT NULL,
+    customer_name VARCHAR(100),
+    signed_at DATE,
+    total_amount DECIMAL(12,2),
+    file_url TEXT,
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE contract_change_orders (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    contract_id UUID NOT NULL REFERENCES contract_contracts(id),
+    change_desc TEXT NOT NULL,
+    amount_delta DECIMAL(12,2) NOT NULL,
+    status VARCHAR(20) DEFAULT '待确认' CHECK (status IN ('待确认','已确认','已拒绝')),
+    created_by UUID REFERENCES users(id),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+```
+
+#### 5.2.5 财务域
+```sql
+CREATE TABLE finance_payment_schedules (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    contract_id UUID NOT NULL REFERENCES contract_contracts(id),
+    stage_name VARCHAR(100) NOT NULL,
+    ratio DECIMAL(5,2) NOT NULL,
+    amount DECIMAL(12,2) NOT NULL,
+    due_date DATE,
+    paid_at DATE,
+    status VARCHAR(20) DEFAULT '待收款' CHECK (status IN ('待收款','已收款','已逾期')),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE finance_transactions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    project_id UUID REFERENCES pm_projects(id),
+    category VARCHAR(20) NOT NULL CHECK (category IN ('收入','支出')),
+    type VARCHAR(30) NOT NULL,
+    amount DECIMAL(12,2) NOT NULL,
+    payment_method VARCHAR(20),
+    paid_at DATE,
+    remark TEXT,
+    created_by UUID REFERENCES users(id),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+```
+
+#### 5.2.6 材料库
+```sql
+CREATE TABLE material_items (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    name VARCHAR(200) NOT NULL,
+    category VARCHAR(50),
+    unit VARCHAR(20),
+    default_price DECIMAL(10,2),
+    supplier VARCHAR(100),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE pm_project_materials (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id UUID NOT NULL REFERENCES pm_projects(id),
+    material_id UUID NOT NULL REFERENCES material_items(id),
+    planned_qty DECIMAL(10,2),
+    actual_qty DECIMAL(10,2),
+    unit_price DECIMAL(10,2),
+    created_at TIMESTAMPTZ DEFAULT now()
+);
+```
+
+**扩展性备注**：客户扩展属性、施工阶段自定义字段均可使用 JSONB 类型字段存储。
+
+---
+
+## 6. 后端 API 设计
+
+### 6.1 接口规范
+- **Base URL**：`/api/v1`
+- **认证**：`Authorization: Bearer <access_token>`
+- **响应格式**：
+```json
+{
+  "code": 0,
+  "data": {},
+  "message": "success"
+}
+```
+- **分页参数**：`?page=1&page_size=20`，响应包含 `total`, `page`, `page_size`
+- **错误码**：0 成功，400 参数错误，401 未认证，403 权限不足，404 未找到，500 服务器内部错误
+
+### 6.2 核心 API 列表
+
+#### 6.2.1 认证
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/auth/register` | 注册租户和超级管理员 |
+| POST | `/auth/login` | 邮箱密码登录，返回 tokens |
+| POST | `/auth/refresh` | 刷新 access token |
+| POST | `/auth/logout` | 退出，删除 refresh token |
+
+#### 6.2.2 客户管理
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/customers` | 客户列表（分页，筛选 stage/source/assigned_to） |
+| POST | `/customers` | 新建客户 |
+| GET | `/customers/{id}` | 客户详情（含最近跟进记录） |
+| PUT | `/customers/{id}` | 编辑客户信息 |
+| PATCH | `/customers/{id}/stage` | 移动客户阶段 |
+| DELETE | `/customers/{id}` | 软删除客户 |
+| POST | `/customers/{id}/follow-ups` | 添加跟进记录 |
+| GET | `/customers/{id}/follow-ups` | 获取跟进时间线 |
+
+#### 6.2.3 项目管理
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/projects` | 项目列表（筛选状态、成员） |
+| POST | `/projects` | 创建项目（关联客户和合同） |
+| GET | `/projects/{id}` | 项目详情（含成员、阶段、材料） |
+| PUT | `/projects/{id}` | 编辑项目基本信息 |
+| POST | `/projects/{id}/members` | 添加项目成员 |
+| DELETE | `/projects/{id}/members/{user_id}` | 移除成员 |
+| GET | `/projects/{id}/stages` | 项目的所有阶段 |
+| POST | `/projects/{id}/stages` | 添加自定义阶段 |
+| PUT | `/stages/{stage_id}` | 更新阶段状态/时间 |
+| POST | `/stages/{stage_id}/logs` | 提交施工日志（multipart 图片） |
+| GET | `/stages/{stage_id}/logs` | 阶段日志列表 |
+| PATCH | `/projects/{id}/progress` | 手动更新项目总体进度 |
+
+#### 6.2.4 报价与合同
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/quotations` | 报价列表 |
+| POST | `/quotations` | 新建报价单 |
+| GET | `/quotations/{id}` | 报价详情（含明细） |
+| POST | `/quotations/{id}/items` | 添加报价项 |
+| PUT | `/quotations/{id}/items/{item_id}` | 修改报价项 |
+| DELETE | `/quotations/{id}/items/{item_id}` | 删除报价项 |
+| GET | `/contracts` | 合同列表 |
+| POST | `/contracts` | 生成合同（基于报价单） |
+| GET | `/contracts/{id}` | 合同详情 |
+| GET | `/contracts/{id}/pdf` | 下载合同 PDF |
+| POST | `/contracts/{id}/changes` | 创建变更单 |
+
+#### 6.2.5 财务
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/payment-schedules` | 收款计划列表（按项目） |
+| POST | `/payment-schedules/{id}/mark-paid` | 标记已收款 |
+| GET | `/transactions` | 交易流水 |
+| POST | `/transactions` | 记录收入/支出 |
+
+#### 6.2.6 材料库
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/materials` | 材料列表（分类筛选） |
+| POST | `/materials` | 添加材料 |
+| PUT | `/materials/{id}` | 编辑材料 |
+
+#### 6.2.7 报表
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/reports/sales-funnel` | 销售漏斗数据 |
+| GET | `/reports/profit` | 产值利润报表 |
+| GET | `/reports/efficiency` | 施工效率统计 |
+
+#### 6.2.8 系统管理
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/admin/tenant` | 获取当前租户配置 |
+| PUT | `/admin/tenant` | 更新租户设置 |
+| GET | `/admin/users` | 企业成员列表 |
+| POST | `/admin/users/invite` | 邀请新成员 |
+| PUT | `/admin/users/{id}/role` | 修改角色 |
+| GET | `/admin/audit-logs` | 操作日志 |
+
+### 6.3 异步任务（Celery）
+- `send_notification`：发送站内通知、邮件、企微/钉钉消息
+- `generate_contract_pdf`：生成合同 PDF 并上传到 S3
+- `update_project_progress`：根据阶段完成情况自动计算项目进度
+- `daily_report_digest`：汇总日报发送给老板
+
+---
+
+## 7. 前端架构与界面规范
+
+### 7.1 前端项目结构
+```
+src/
+├── app/                    # Next.js 13+ app Router
+│   ├── (auth)/             # 登录、注册
+│   ├── (dashboard)/
+│   │   ├── customers/
+│   │   ├── projects/[id]/
+│   │   ├── quotations/
+│   │   ├── contracts/
+│   │   ├── reports/
+│   │   └── settings/
+│   └── layout.tsx
+├── components/
+│   ├── ui/                 # shadcn 基础组件（button, input, modal...）
+│   ├── shared/             # 业务共享组件（UserAvatar, FileUploader）
+│   └── layouts/            # 主布局、侧边栏、顶部导航
+├── features/               # 按功能模块组织（领域逻辑）
+│   ├── customers/
+│   ├── projects/
+│   └── quotations/
+├── hooks/                  # 自定义 hooks（useAuth, useTenant）
+├── lib/                    # API 客户端、工具函数、常量
+│   ├── api-client.ts       # 自动附带 token 和错误处理
+│   ├── validations.ts      # Zod schemas
+│   └── utils.ts
+├── styles/
+│   └── globals.css         # Tailwind directives
+└── middleware.ts           # 路由守卫、重定向
+```
+
+### 7.2 页面设计原则
+- **响应式**：移动端优先，工长操作界面适配 375px
+- **组件化**：表单、表格、详情卡片高度复用
+- **一致性**：统一使用 shadcn 组件，保持间距 (8px 基数)、颜色（primary-600 主色）、圆角、阴影规范
+- **交互反馈**：乐观更新（TanStack Query），加载骨架屏，错误 toast 提示
+
+### 7.3 核心页面描述
+
+#### 客户管理列表
+- 表格显示：姓名、电话、阶段、来源、负责人、最近跟进时间
+- 顶部筛选栏：阶段下拉、来源多选、搜索框
+- 行操作：快速添加跟进、转阶段、编辑
+- 批量操作：指派给某人、导出 Excel
+
+#### 项目看板
+- 卡片视图：每个项目一张卡片，展示项目名、客户、进度条、阶段状态
+- 可按状态分组（待开工/施工中/已完工）
+- 点击卡片进入项目详情
+- 支持按项目经理、工长筛选
+
+#### 项目详情
+- 顶部概览：项目名称、地址、客户、时间周期、进度百分比
+- 标签页切换：
+  - **阶段与日志**：时间线展示各阶段，展开可看施工日志照片墙
+  - **团队成员**
+  - **材料清单**
+  - **合同与收款**
+- 进度阶段可用拖拽调整状态（仅特定角色）
+
+#### 报价构建器
+- 左侧空间列表，可添加/删除空间（客厅、卧室）
+- 右侧为某一空间下的报价项表格，可内联编辑数量、单价
+- 底部实时汇总，支持优惠折扣输入
+- 提供“保存为模板”功能
+
+#### 销售漏斗
+- 水平柱状图（Recharts）展示各阶段客户数
+- 点击任一柱形可展开该阶段客户列表
+- 支持拖拽客户卡片到下一阶段（显式调用 API 移动）
+
+### 7.4 移动端适配
+- 底部 Tab 导航（首页、客户、项目、消息、我）
+- 施工日志填报：大段文本框 + 拍照/相册上传，自动压缩
+- 客户看板分享页：纯只读，无登录，图片懒加载
+
+---
+
+## 8. 部署与运维
+
+### 8.1 环境要求
+- 后端：Docker 镜像，基于 `python:3.11-slim`
+- 数据库：PostgreSQL 15（至少2核4G，SSD）
+- Redis：6.x+
+- 前端：Next.js 构建后静态文件部署到 CDN 或 Node.js 服务器
+
+### 8.2 Docker Compose 示例（开发/测试）
+```yaml
+version: '3.8'
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: crm
+      POSTGRES_USER: crm_user
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+  redis:
+    image: redis:7
+  backend:
+    build: ./backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    depends_on:
+      - db
+      - redis
+    environment:
+      DATABASE_URL: postgresql+asyncpg://crm_user:secret@db/crm
+      REDIS_URL: redis://redis:6379
+  celery_worker:
+    build: ./backend
+    command: celery -A app.tasks worker --loglevel=info
+    depends_on:
+      - db
+      - redis
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+volumes:
+  pgdata:
+```
+
+### 8.3 生产部署关键点
+- **负载均衡**：Nginx 或 Traefik 反向代理，多实例 FastAPI
+- **数据库**：主从复制，连接池（SQLAlchemy `pool_size=20`）
+- **静态资源**：构建时上传 CDN，Next.js 使用 `assetPrefix`
+- **环境变量**：敏感信息通过 Vault 或 K8s Secrets 管理
+- **健康检查**：后端提供 `/health`，数据库、Redis 连通性检查
+- **日志**：标准化 JSON 格式，输出到 stdout，由日志收集器转发
+- **备份**：pg_dump 每日备份，30 天保留，定期恢复演练
+
+---
+
+## 9. 开发规范与流程
+
+### 9.1 分支管理
+- `main` 主干，受保护，仅通过 PR 合并
+- `develop` 开发分支
+- 功能分支：`feat/<module>-<desc>`，例：`feat/customer-followup`
+- 修复分支：`fix/<issue-id>`
+
+### 9.2 代码规范
+- **Python**：Black 格式化，Flake8 检查，类型提示，Pydantic 模型校验
+- **TypeScript**：ESLint + Prettier 标准，严格模式，所有数据定义 Zod schema
+- **Git 提交**：Conventional Commits（`feat:`, `fix:`, `docs:`, `refactor:`）
+
+### 9.3 测试策略
+- 后端：pytest + httpx 编写集成测试，核心业务逻辑单元测试覆盖率 >80%
+- 前端：Jest + React Testing Library 组件测试，Cypress E2E 覆盖关键流程（注册→建客户→建项目→写日志）
+- API 文档：FastAPI 自动生成 Swagger，开发阶段即用即测
+
