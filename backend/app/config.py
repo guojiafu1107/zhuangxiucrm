@@ -19,8 +19,8 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
 
-    # CORS
-    cors_origins: list[str] = ["http://localhost:3000"]
+    # CORS - 逗号分隔的 origins，兼容 Render 环境变量
+    cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001,http://127.0.0.1:3001"
 
     # File upload
     max_upload_size: int = 20 * 1024 * 1024  # 20MB

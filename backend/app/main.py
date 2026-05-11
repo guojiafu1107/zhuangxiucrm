@@ -32,10 +32,16 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS
+# CORS - 支持逗号分隔字符串和 JSON 数组
+import json as json_lib
+cors_raw = settings.cors_origins
+try:
+    cors_list = json_lib.loads(cors_raw) if cors_raw.startswith("[") else [o.strip() for o in cors_raw.split(",") if o.strip()]
+except (json_lib.JSONDecodeError, AttributeError):
+    cors_list = ["http://localhost:3000"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=cors_list,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -1,0 +1,29 @@
+services:
+  # ===== 后端 API =====
+  - type: web
+    name: zhuangxiu-crm-backend
+    runtime: docker
+    rootDir: ./backend
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "false"
+      - key: CORS_ORIGINS
+        sync: false
+
+  # ===== 前端 =====
+  - type: web
+    name: zhuangxiu-crm-frontend
+    runtime: docker
+    rootDir: ./frontend
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        sync: false
+
+databases:
+  - name: zhuangxiu-crm-db
+    databaseName: crm
+    plan: free
