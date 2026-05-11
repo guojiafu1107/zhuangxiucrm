@@ -2,15 +2,16 @@ version: '3.8'
 
 services:
   db:
-    image: postgres:15
+    image: postgres:15-alpine
     environment:
       POSTGRES_DB: crm
       POSTGRES_USER: crm_user
-      POSTGRES_PASSWORD: secret
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-secret}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    restart: always
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U crm_user -d crm"]
       interval: 10s
@@ -20,7 +21,8 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
+    restart: always
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -31,47 +33,31 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
     ports:
-      - "8000:8000"
-    volumes:
-      - ./backend:/app
+      - "127.0.0.1:8000:8000"
     environment:
-      DATABASE_URL: postgresql+asyncpg://crm_user:secret@db:5432/crm
+      DATABASE_URL: postgresql+asyncpg://crm_user:${DB_PASSWORD:-secret}@db:5432/crm
       REDIS_URL: redis://redis:6379/0
-      JWT_SECRET_KEY: dev-secret-key-change-in-production
-      DEBUG: "true"
-      CORS_ORIGINS: '["http://localhost:3000"]'
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      DEBUG: "false"
+      CORS_ORIGINS: '["${DOMAIN:-http://localhost:3000}"]'
+    restart: always
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
 
-  celery_worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    command: celery -A app.tasks worker --loglevel=info
-    volumes:
-      - ./backend:/app
-    environment:
-      DATABASE_URL: postgresql+asyncpg://crm_user:secret@db:5432/crm
-      REDIS_URL: redis://redis:6379/0
-      JWT_SECRET_KEY: dev-secret-key-change-in-production
-    depends_on:
-      - db
-      - redis
-      - backend
-
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_API_URL: ${API_URL:-http://localhost:8000}
+    restart: always
     depends_on:
       - backend
 
